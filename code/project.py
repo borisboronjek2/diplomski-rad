@@ -523,6 +523,11 @@ class MainWindow(QMainWindow):
         auralize_button.clicked.connect(self.auralize)
         layout.addWidget(auralize_button)
 
+        self.save_auralized_button = QPushButton("Spremi auralizirani zvuk")
+        self.save_auralized_button.setEnabled(False)
+        self.save_auralized_button.clicked.connect(self.save_auralized)
+        layout.addWidget(self.save_auralized_button)
+
         # Play controls
         controls_layout = QHBoxLayout()
         self.play_button = QPushButton("Play")
@@ -696,6 +701,7 @@ class MainWindow(QMainWindow):
             self.original_wav = self.wav_data.copy()
             self.current_filename = os.path.basename(file_name)
             self.playing_label.setText(self.current_filename)
+            self.save_auralized_button.setEnabled(False)
 
     def set_position(self, position):
         self.media_player.setPosition(position)
@@ -758,9 +764,23 @@ class MainWindow(QMainWindow):
             sf.write(self.temp_file.name, self.auralized, self.samplerate)
             self.media_player.setSource(QUrl.fromLocalFile(self.temp_file.name))
             self.playing_label.setText(f"{self.current_filename} (auralizirano)")
+            self.save_auralized_button.setEnabled(True)
             QMessageBox.information(self, "Info", "Auralizacija završena")
         else:
             QMessageBox.warning(self, "Upozorenje", "Učitajte wav i izračunajte IR prvo")
+
+    def save_auralized(self):
+        if not hasattr(self, 'auralized'):
+            QMessageBox.warning(self, "Upozorenje", "Nema auraliziranog zvuka za spremanje")
+            return
+
+        file_name, _ = QFileDialog.getSaveFileName(self, "Spremi auralizirani zvuk", "auralized.wav", "WAV files (*.wav)")
+        if file_name:
+            try:
+                sf.write(file_name, self.auralized, self.samplerate)
+                QMessageBox.information(self, "Info", f"Auralizirani zvuk je spremljen u {file_name}")
+            except Exception as e:
+                QMessageBox.warning(self, "Greška", f"Neuspjelo spremanje zvuka: {e}")
 
     def closeEvent(self, event):
         self.media_player.stop()

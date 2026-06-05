@@ -592,6 +592,7 @@ class MainWindow(QMainWindow):
             self.ir[direct_delay] += direct_amplitude
 
         max_order = 3
+        max_reflection_delay = 0
         for i in range(-max_order, max_order + 1):
             for j in range(-max_order, max_order + 1):
                 for k in range(-max_order, max_order + 1):
@@ -621,9 +622,11 @@ class MainWindow(QMainWindow):
                         continue
 
                     path_coef = self.reflection_path_coefficient(i, j, k, r_coefs)
-                    amplitude = path_coef / (dist + 0.1)
+                    correction = (path_coef * direct_dist / (dist + 0.1))**2
+                    amplitude = direct_amplitude * correction
                     self.reflection_ir[delay] += amplitude
                     self.ir[delay] += amplitude
+                    max_reflection_delay = max(max_reflection_delay, delay)
 
         V = L * W * H
         areas = [L * W, L * W, W * H, W * H, L * H, L * H]
@@ -655,7 +658,10 @@ class MainWindow(QMainWindow):
         if rt60_for_tail <= 0:
             rt60_for_tail = 1.0
 
-        tail_start = int(0.15 * self.fs)
+        predelay = 2.0 * V ** (1.0 / 3.0) / c
+        tail_start = int(predelay * self.fs)
+        if max_reflection_delay > 0:
+            tail_start = max(tail_start, max_reflection_delay + 1)
 
         if tail_start < ir_length:
             tail_len = ir_length - tail_start
@@ -664,14 +670,17 @@ class MainWindow(QMainWindow):
             window_size = int(0.02 * self.fs)
             search_start = max(0, tail_start - window_size)
             if search_start < tail_start:
-                start_amp = np.max(np.abs(self.ir[search_start:tail_start]))
-                if start_amp == 0:
-                    start_amp = 0.02
+                reflections_segment = np.abs(self.reflection_ir[search_start:tail_start])
+                if reflections_segment.size and np.any(reflections_segment > 0):
+                    start_amp = np.mean(reflections_segment[reflections_segment > 0])
+                else:
+                    start_amp = np.max(np.abs(self.ir[search_start:tail_start]))
+                start_amp = max(start_amp, 0.02)
             else:
                 start_amp = 0.02
-                
+
             tail = start_amp * decay
-            
+
             self.ir[tail_start:] += tail
             self.reflection_ir[tail_start:] += tail
 
@@ -714,10 +723,13 @@ class MainWindow(QMainWindow):
         ax = self.ir_figure.add_subplot(111)
         time_axis = np.arange(len(self.ir)) / self.fs
         
-        ax.plot(time_axis, self.ir)
+        ax.plot(time_axis, self.ir, label='Rane refleksije i odjek')
+        if hasattr(self, 'direct_ir'):
+            ax.plot(time_axis, self.direct_ir, color='red', linewidth=1.5, label='Direktni zvuk')
         ax.set_title('Impulsni odziv')
         ax.set_xlabel('Vrijeme (s)')
         ax.set_ylabel('Amplituda')
+        ax.legend()
         self.ir_canvas.draw()
 
     def auralize(self):

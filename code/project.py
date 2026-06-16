@@ -3,7 +3,7 @@ import os
 os.environ['QT_API'] = 'pyqt6'
 import sqlite3
 import numpy as np
-from scipy.signal import convolve
+from scipy.signal import convolve, butter, sosfilt
 import soundfile as sf
 import tempfile
 import matplotlib.pyplot as plt
@@ -595,8 +595,9 @@ class MainWindow(QMainWindow):
         if direct_delay < ir_length:
             self.direct_ir[direct_delay] += direct_amplitude
             self.ir[direct_delay] += direct_amplitude
+        self.direct_dist = direct_dist
 
-        max_order = 3
+        max_order = 1
         max_reflection_delay = 0
         for i in range(-max_order, max_order + 1):
             for j in range(-max_order, max_order + 1):
@@ -629,7 +630,7 @@ class MainWindow(QMainWindow):
                     path_coef = self.reflection_path_coefficient(i, j, k, r_coefs)
                     correction = (path_coef * direct_dist / (dist + 0.1))**2
                     amplitude = direct_amplitude * correction
-                    self.reflection_ir[delay] += amplitude
+                    self.direct_ir[delay] += amplitude
                     self.ir[delay] += amplitude
                     max_reflection_delay = max(max_reflection_delay, delay)
 
@@ -663,15 +664,12 @@ class MainWindow(QMainWindow):
         if rt60_for_tail <= 0:
             rt60_for_tail = 1.0
 
-        predelay = 2.0 * V ** (1.0 / 3.0) / c
-        tail_start = int(predelay * self.fs)
-        if max_reflection_delay > 0:
-            tail_start = max(tail_start, max_reflection_delay + 1)
+        predelay = 2.0 * V ** (1.0 / 3.0) / 1000.0
+        tail_start = int(direct_delay + predelay * self.fs)
 
         if tail_start < ir_length:
             tail_len = ir_length - tail_start
-            tail_time = np.arange(tail_len) / self.fs
-            decay = np.exp(-6.91 * tail_time / rt60_for_tail)
+
             window_size = int(0.02 * self.fs)
             search_start = max(0, tail_start - window_size)
             if search_start < tail_start:
@@ -684,10 +682,61 @@ class MainWindow(QMainWindow):
             else:
                 start_amp = 0.02
 
-            tail = start_amp * decay
+            bands = np.array([63, 125, 250, 500, 1000, 2000, 4000, 8000], dtype=float)
+            rt60_bands = rt60_sabine.copy()
+            max_rt60 = np.max(rt60_bands[np.isfinite(rt60_bands)]) if np.any(np.isfinite(rt60_bands)) else 1.0
+            if max_rt60 <= 0:
+                max_rt60 = 1.0
 
-            self.ir[tail_start:] += tail
-            self.reflection_ir[tail_start:] += tail
+            noise_len_sec = min(30.0, 1.5 * max_rt60)
+            noise_len = max(1, int(noise_len_sec * self.fs))
+            white_noise = np.random.normal(0.0, 1.0, noise_len)
+
+            final_tail = np.zeros(tail_len)
+            t_tail = np.arange(tail_len) / self.fs
+
+            for b_idx, center in enumerate(bands):
+                low = center / np.sqrt(2.0)
+                high = center * np.sqrt(2.0)
+                nyq = self.fs / 2.0
+                if low >= nyq:
+                    band_signal = np.zeros(tail_len)
+                    continue
+                if high >= nyq:
+                    high = nyq * 0.999
+
+                try:
+                    sos = butter(4, [low, high], btype='band', fs=self.fs, output='sos')
+                    band_noise = sosfilt(sos, white_noise)
+                except Exception:
+                    band_noise = np.zeros_like(white_noise)
+
+                rt60_band = rt60_bands[b_idx] if rt60_bands[b_idx] > 0 else max_rt60
+                env_len = len(band_noise)
+                env_t = np.arange(env_len) / self.fs
+                envelope = np.exp(-13.82 * env_t / rt60_band)
+                band_tail = band_noise * envelope
+
+                if env_len < tail_len:
+                    repeats = int(np.ceil(tail_len / env_len))
+                    band_tail_long = np.tile(band_tail, repeats)[:tail_len]
+                else:
+                    band_tail_long = band_tail[:tail_len]
+
+                final_tail += band_tail_long
+
+            peak = np.max(np.abs(final_tail))
+            if peak > 0:
+                final_tail = final_tail / peak * start_amp
+            else:
+                tail_time = t_tail
+                final_tail = start_amp * np.exp(-13.82 * tail_time / (rt60_for_tail if rt60_for_tail > 0 else 1.0))
+
+            self.ir[tail_start:tail_start + tail_len] += final_tail
+            self.reflection_ir[tail_start:tail_start + tail_len] += final_tail
+
+        self.rt60_sabine = rt60_sabine
+        self.predelay = 2.0 * V ** (1.0 / 3.0) / 1000.0
 
         self.plot_ir()
 
@@ -729,9 +778,10 @@ class MainWindow(QMainWindow):
         ax = self.ir_figure.add_subplot(111)
         time_axis = np.arange(len(self.ir)) / self.fs
         
-        ax.plot(time_axis, self.ir, label='Rane refleksije i odjek')
+        display_ir = np.abs(self.ir)
+        ax.plot(time_axis, display_ir, label='Odjek')
         if hasattr(self, 'direct_ir'):
-            ax.plot(time_axis, self.direct_ir, color='red', linewidth=1.5, label='Direktni zvuk')
+            ax.plot(time_axis, self.direct_ir, color='red', linewidth=1.5, label='Direktni zvuk i rane refleksije')
         ax.set_title('Impulsni odziv')
         ax.set_xlabel('Vrijeme (s)')
         ax.set_ylabel('Amplituda')
@@ -743,23 +793,91 @@ class MainWindow(QMainWindow):
             self.calculate_ir()
         if hasattr(self, 'wav_data') and hasattr(self, 'ir'):
             self.media_player.stop()
+
             if self.wav_data.ndim == 1:
-                auralized = convolve(self.wav_data, self.ir, mode='full')
+                input_audio = self.wav_data.copy()
             else:
-                channels = []
-                for ch in range(self.wav_data.shape[1]):
-                    channels.append(convolve(self.wav_data[:, ch], self.ir, mode='full'))
-                auralized = np.stack(channels, axis=-1)
-            max_val = np.max(np.abs(auralized))
+                input_audio = np.mean(self.wav_data, axis=1)
+
+            bands = np.array([63, 125, 250, 500, 1000, 2000, 4000, 8000], dtype=float)
+            rt60_bands = self.rt60_sabine if hasattr(self, 'rt60_sabine') else np.ones(8)
+            max_rt60 = np.max(rt60_bands[np.isfinite(rt60_bands)]) if np.any(np.isfinite(rt60_bands)) else 1.0
+            if max_rt60 <= 0:
+                max_rt60 = 1.0
+
+            noise_len_sec = min(30.0, 1.5 * max_rt60)
+            noise_len = max(1, int(noise_len_sec * self.fs))
+            white_noise = np.random.normal(0.0, 1.0, noise_len)
+
+            predelay_sec = self.predelay if hasattr(self, 'predelay') else 0.1
+            predelay_samples = int(predelay_sec * self.fs)
+
+            final_auralized = np.zeros(len(input_audio) + len(self.ir))
+            nyq = self.fs / 2.0
+
+            for b_idx, center in enumerate(bands):
+                low = center / np.sqrt(2.0)
+                high = center * np.sqrt(2.0)
+
+                if low >= nyq:
+                    continue
+                if high >= nyq:
+                    high = nyq * 0.999
+
+                try:
+                    sos = butter(4, [low, high], btype='band', fs=self.fs, output='sos')
+                    band_input = sosfilt(sos, input_audio)
+                    band_noise = sosfilt(sos, white_noise)
+                except Exception:
+                    band_input = np.zeros_like(input_audio)
+                    band_noise = np.zeros_like(white_noise)
+
+                rt60_band = rt60_bands[b_idx] if rt60_bands[b_idx] > 0 else max_rt60
+                env_t = np.arange(len(band_noise)) / self.fs
+                envelope = np.exp(-13.82 * env_t / rt60_band)
+                band_tail_impulse = band_noise * envelope
+
+                if predelay_samples > 0:
+                    band_tail_impulse = np.concatenate((np.zeros(predelay_samples, dtype=band_tail_impulse.dtype), band_tail_impulse))
+
+                peak_tail = np.max(np.abs(band_tail_impulse))
+                peak_refl = np.max(np.abs(self.reflection_ir))
+                direct_dist = getattr(self, 'direct_dist', 1.0)
+                tail_gain = 0.15 * (1.0 + min(direct_dist, 6.0) / 3.0)
+                tail_gain = min(tail_gain, 0.5)
+                if peak_tail > 0 and peak_refl > 0:
+                    band_tail_impulse = band_tail_impulse / peak_tail * peak_refl * tail_gain
+
+                early_ir = 2.0 * self.direct_ir
+                band_convolved = convolve(band_input, early_ir, mode='full')
+                band_convolved_tail = convolve(band_input, band_tail_impulse, mode='full')
+                
+                max_len = max(len(band_convolved), len(band_convolved_tail))
+                if len(band_convolved) < max_len:
+                    band_convolved = np.pad(band_convolved, (0, max_len - len(band_convolved)), mode='constant')
+                if len(band_convolved_tail) < max_len:
+                    band_convolved_tail = np.pad(band_convolved_tail, (0, max_len - len(band_convolved_tail)), mode='constant')
+                
+                band_convolved += 0.2 * band_convolved_tail
+
+                if len(final_auralized) < len(band_convolved):
+                    final_auralized = np.pad(final_auralized, (0, len(band_convolved) - len(final_auralized)), mode='constant')
+                
+                final_auralized[:len(band_convolved)] += band_convolved
+
+            max_val = np.max(np.abs(final_auralized))
             if max_val > 0:
-                auralized = auralized / max_val
-            self.auralized = auralized.astype(np.float32)
+                final_auralized = final_auralized / max_val
+
+            self.auralized = final_auralized.astype(np.float32)
+
             if self.temp_file:
                 try:
                     if os.path.exists(self.temp_file.name):
                         os.unlink(self.temp_file.name)
                 except:
                     pass
+
             self.temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
             sf.write(self.temp_file.name, self.auralized, self.samplerate)
             self.media_player.setSource(QUrl.fromLocalFile(self.temp_file.name))

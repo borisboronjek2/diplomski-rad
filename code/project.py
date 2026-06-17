@@ -844,7 +844,7 @@ class MainWindow(QMainWindow):
                 peak_refl = np.max(np.abs(self.reflection_ir))
                 direct_dist = getattr(self, 'direct_dist', 1.0)
                 tail_gain = 0.15 * (1.0 + min(direct_dist, 6.0) / 3.0)
-                tail_gain = min(tail_gain, 0.5)
+                tail_gain = min(tail_gain, 0.4)
                 if peak_tail > 0 and peak_refl > 0:
                     band_tail_impulse = band_tail_impulse / peak_tail * peak_refl * tail_gain
 

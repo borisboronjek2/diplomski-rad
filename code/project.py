@@ -148,17 +148,17 @@ class MainWindow(QMainWindow):
         self.length_edit = QDoubleSpinBox()
         self.length_edit.setRange(0.1, 100)
         self.length_edit.setSingleStep(0.1)
-        self.length_edit.setValue(5.0)
+        self.length_edit.setValue(25.0)
         dim_layout.addRow("Dužina:", self.length_edit)
         self.width_edit = QDoubleSpinBox()
         self.width_edit.setRange(0.1, 100)
         self.width_edit.setSingleStep(0.1)
-        self.width_edit.setValue(4.0)
+        self.width_edit.setValue(14.0)
         dim_layout.addRow("Širina:", self.width_edit)
         self.height_edit = QDoubleSpinBox()
         self.height_edit.setRange(0.1, 100)
         self.height_edit.setSingleStep(0.1)
-        self.height_edit.setValue(3.0)
+        self.height_edit.setValue(10.0)
         dim_layout.addRow("Visina:", self.height_edit)
         layout.addWidget(dim_group)
 
@@ -843,6 +843,7 @@ class MainWindow(QMainWindow):
                 peak_tail = np.max(np.abs(band_tail_impulse))
                 peak_refl = np.max(np.abs(self.reflection_ir))
                 direct_dist = getattr(self, 'direct_dist', 1.0)
+                distance_factor = max(0.2, min(direct_dist / 3.0, 1.0))
                 tail_gain = 0.15 * (1.0 + min(direct_dist, 6.0) / 3.0)
                 tail_gain = min(tail_gain, 0.4)
                 if peak_tail > 0 and peak_refl > 0:
@@ -858,7 +859,7 @@ class MainWindow(QMainWindow):
                 if len(band_convolved_tail) < max_len:
                     band_convolved_tail = np.pad(band_convolved_tail, (0, max_len - len(band_convolved_tail)), mode='constant')
                 
-                band_convolved += 0.2 * band_convolved_tail
+                band_convolved += 0.2 * band_convolved_tail * distance_factor
 
                 if len(final_auralized) < len(band_convolved):
                     final_auralized = np.pad(final_auralized, (0, len(band_convolved) - len(final_auralized)), mode='constant')
